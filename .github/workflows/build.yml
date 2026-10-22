@@ -22,31 +22,91 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find or extract source project
+      - name: Extract God of Time source
         shell: bash
         run: |
           set -euo pipefail
+
+          archive="godoftime-astral-orange-black.zip"
+
+          if [[ ! -f "$archive" ]]; then
+            echo "ERROR: Could not find $archive in the repository root."
+            find . -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          mkdir -p .ci-unpacked
+          unzip -q -o "$archive" -d .ci-unpacked
+
+          find .ci-unpacked -type f -name build.gradle \
+            -not -path '*/build/*' -print > .ci-build-files.txt
+
           project_dir=""
 
-          if [[ -f build.gradle && -f src/main/java/com/godoftime/GodOfTimeMod.java ]]; then
-            project_dir="$GITHUB_WORKSPACE"
-          else
-            mkdir -p .ci-unpacked
-            archive=""
+          while IFS= read -r build_file; do
+            candidate_dir="${build_file%/build.gradle}"
 
-            # Prefer the newest source archive.
-            for candidate in ./godoftime-astral-orange-black.zip ./GodOfTimeMod-source.zip; do
-              if [[ -f "$candidate" ]] && unzip -Z1 "$candidate" | grep -qE '(^|/)src/main/java/com/godoftime/GodOfTimeMod.java$'; then
-                archive="$candidate"
-                break
-              fi
-            done
+            if [[ -f "$candidate_dir/src/main/java/com/godoftime/GodOfTimeMod.java" ]]; then
+              project_dir="$GITHUB_WORKSPACE/$candidate_dir"
+              break
+            fi
+          done < .ci-build-files.txt
 
-            # Search other ZIP files if needed.
-            if [[ -z "$archive" ]]; then
-              while IFS= read -r -d '' candidate; do
-                if unzip -Z1 "$candidate" | grep -qE '(^|/)src/main/java/com/godoftime/GodOfTimeMod.java$'; then
-                  archive="$candidate"
-                  break
-                fi
-              done < <(find . -maxdepth 1 -type f
+          if [[ -z "$project_dir" ]]; then
+            echo "ERROR: God of Time Gradle project was not found."
+            find .ci-unpacked -maxdepth 6 -type f -print | sort | head -200
+            exit 1
+          fi
+
+          if [[ ! -f "$project_dir/gradle.properties" ]]; then
+            echo "ERROR: gradle.properties is missing."
+            exit 1
+          fi
+
+          if [[ ! -f "$project_dir/src/main/resources/META-INF/mods.toml" ]]; then
+            echo "ERROR: mods.toml is missing."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
+          echo "Found project at $project_dir"
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.8'
+
+      - name: Build mod
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+          gradle clean build --no-daemon
+
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+
+          find build/libs \
+            -maxdepth 1 \
+            -type f \
+            -name '*.jar' \
+            ! -name '*sources*.jar' \
+            -print > "$GITHUB_WORKSPACE/.ci-jar-files.txt"
+
+          while IFS= read -r jar_file; do
+            cp "$jar_file" "$GITHUB_WORKSPACE/artifact/"
+          done < "$GITHUB_WORKSPACE/.ci-jar-files.txt"
+
+          if ! compgen -G "$GITHUB_WORKSPACE/artifact/*.jar" > /dev/null; then
+            echo "ERROR: No mod JAR was produced."
+            exit 1
+          fi
+
+          ls -lh "$GITHUB_WORKSPACE/artifact"
+
+      - name: Upload mod JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: godoftime-forge-1.20.1
+          path: artifact/*.jar
+          if-no-files-found: error
